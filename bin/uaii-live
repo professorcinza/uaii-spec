@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # UAII Live — hands-free voice loop for the pi agent (SPEC §7 "input fusion" preview).
 #
-#   mic (ffmpeg VAD) → whisper STT (llama-swap) → pi agent (full tools) → pocket-tts (llama-swap) → afplay
+#   mic (ffmpeg VAD) → parakeet/whisper STT (llama-swap, §5 ladder) → pi agent (full tools) → pocket-tts (llama-swap) → afplay
 #
 # Half-duplex by design: the microphone listens only while the agent is silent,
 # so the agent never hears itself (SPEC §5 ladder, R2 declared losses).
@@ -10,7 +10,8 @@
 #   say "sair" (or tchau / encerrar) to exit · Ctrl+C always works
 #
 # Config (env): UAII_LIVE_BASE_URL   default http://localhost:9292/v1 (any OpenAI-compatible)
-#               UAII_LIVE_STT_MODEL  default whisper-large-v3-turbo
+#               UAII_LIVE_STT_MODEL  default "parakeet whisper-large-v3-turbo"
+#                                    (space-separated ladder: tried in order, §5)
 #               UAII_LIVE_TTS_MODEL  default pocket-tts-pt
 #               UAII_LIVE_TTS_VOICE  default alba
 #               UAII_LIVE_DEVICE     ffmpeg avfoundation audio index, default 0
@@ -21,7 +22,7 @@
 set -u
 
 BASE="${UAII_LIVE_BASE_URL:-http://localhost:9292/v1}"
-STT_MODEL="${UAII_LIVE_STT_MODEL:-whisper-large-v3-turbo}"
+STT_MODELS="${UAII_LIVE_STT_MODEL:-parakeet whisper-large-v3-turbo}" # §5 ladder
 TTS_MODEL="${UAII_LIVE_TTS_MODEL:-pocket-tts-pt}"
 TTS_VOICE="${UAII_LIVE_TTS_VOICE:-alba}"
 DEVICE="${UAII_LIVE_DEVICE:-0}"
@@ -75,14 +76,22 @@ listen() { # $1 = out.raw — blocks until one utterance is captured
 	done
 }
 
-stt() { # $1 = utt.raw → transcribed text (whisper via llama-swap)
-	local wav="${1}.wav"
+stt() { # $1 = utt.raw → transcribed text (llama-swap STT ladder, §5)
+	local wav="${1}.wav" model body
 	ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 -i "$1" "$wav" || return 1
-	curl -s --max-time 60 "$BASE/audio/transcriptions" \
-		-F "file=@$wav" -F "model=$STT_MODEL" |
-		python3 -c 'import json,sys
+	for model in $STT_MODELS; do
+		body=$(curl -s --max-time 60 "$BASE/audio/transcriptions" \
+			-F "file=@$wav" -F "model=$model")
+		if [ -z "$body" ] || printf '%s' "$body" | grep -q '"error"'; then
+			log "⚠️  StructuredLoss: STT '$model' indisponível (channel-off) — próxima da escada"
+			continue
+		fi
+		printf '%s' "$body" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("text", "").strip())
 except Exception: print("")'
+		return 0
+	done
+	return 1
 }
 
 ask_pi() { # $1 = user text → final assistant text (pi headless, full tools)
@@ -102,7 +111,7 @@ speak() { # $1 = text → pocket-tts via llama-swap → speakers
 
 # ---------- main loop ----------
 
-log "UAII Live · STT $STT_MODEL · TTS $TTS_MODEL ($TTS_VOICE) · cérebro: pi completo $PI_ARGS"
+log "UAII Live · STT [$STT_MODELS] · TTS $TTS_MODEL ($TTS_VOICE) · cérebro: pi completo $PI_ARGS"
 log "diga \"sair\" para encerrar · Ctrl+C sai"
 
 while :; do
@@ -110,7 +119,7 @@ while :; do
 	listen "$U" || exit 1
 	[ "$(wc -c <"$U")" -lt 32000 ] && continue # <1s de áudio: ruído/toque acidental
 
-	TEXT=$(stt "$U") || die "whisper indisponível em $BASE"
+	TEXT=$(stt "$U") || die "nenhum STT disponível em $BASE (escada: $STT_MODELS)"
 	[ -z "$TEXT" ] && {
 		log "(áudio ininteligível — repita)"
 		continue
