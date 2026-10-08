@@ -1,0 +1,25 @@
+{
+  "name": "uaii-spec",
+  "version": "0.1.0",
+  "description": "UAII — Unified AI Accessibility Interface: public specification plus reference pi extension implementing Intent Objects, channel renderers, User Profile, capability negotiation, and declared (never silent) loss.",
+  "keywords": [
+    "pi-package",
+    "accessibility",
+    "a11y",
+    "uaii",
+    "screen-reader",
+    "protocol"
+  ],
+  "license": "CC-BY-4.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/professorcinza/uaii-spec.git"
+  },
+  "pi": {
+    "extensions": ["extensions/uaii.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  }
+}
