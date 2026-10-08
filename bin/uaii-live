@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# UAII Live — hands-free voice loop for the pi agent (SPEC §7 "input fusion" preview).
+#
+#   mic (ffmpeg VAD) → whisper STT (llama-swap) → pi agent (full tools) → pocket-tts (llama-swap) → afplay
+#
+# Half-duplex by design: the microphone listens only while the agent is silent,
+# so the agent never hears itself (SPEC §5 ladder, R2 declared losses).
+#
+# Usage:  uaii-live [in a project directory — pi runs there with full tools]
+#   say "sair" (or tchau / encerrar) to exit · Ctrl+C always works
+#
+# Config (env): UAII_LIVE_BASE_URL   default http://localhost:9292/v1 (any OpenAI-compatible)
+#               UAII_LIVE_STT_MODEL  default whisper-large-v3-turbo
+#               UAII_LIVE_TTS_MODEL  default pocket-tts-pt
+#               UAII_LIVE_TTS_VOICE  default alba
+#               UAII_LIVE_DEVICE     ffmpeg avfoundation audio index, default 0
+#               UAII_LIVE_SILENCE_DB speech threshold (RMS dB), default -40
+#               UAII_LIVE_PI_ARGS    extra pi flags, default "--no-extensions"
+#                                    (the UAII pi extension would double-speak otherwise)
+# Requires: ffmpeg, afplay (macOS), curl, node, pi
+set -u
+
+BASE="${UAII_LIVE_BASE_URL:-http://localhost:9292/v1}"
+STT_MODEL="${UAII_LIVE_STT_MODEL:-whisper-large-v3-turbo}"
+TTS_MODEL="${UAII_LIVE_TTS_MODEL:-pocket-tts-pt}"
+TTS_VOICE="${UAII_LIVE_TTS_VOICE:-alba}"
+DEVICE="${UAII_LIVE_DEVICE:-0}"
+SILENCE_DB="${UAII_LIVE_SILENCE_DB:--40}"
+CHUNK_SECS=0.4
+QUIET_CHUNKS="${UAII_LIVE_QUIET_CHUNKS:-6}" # ~2.4s silence ends the utterance
+MAX_SECS="${UAII_LIVE_MAX_SECS:-20}"
+PI_ARGS="${UAII_LIVE_PI_ARGS:---no-extensions}"
+SPOKEN_MAX=400 # chars; beyond → declared StructuredLoss (bandwidth)
+export UAII_LIVE_TTS_MODEL="$TTS_MODEL" UAII_LIVE_TTS_VOICE="$TTS_VOICE"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/uaii-live.XXXXXX")"
+trap 'rm -rf "$TMP"; exit 0' INT TERM
+
+log() { printf '%s\n' "$*" >&2; }
+
+die() { log "❌ $*"; exit 1; }
+
+need() { command -v "$1" >/dev/null || die "'$1' não encontrado no PATH"; }
+need ffmpeg; need afplay; need curl; need node; need pi
+
+# ---------- pipeline stages ----------
+
+rms_db() { # file.raw → RMS level in dB (digital silence → -99)
+	ffmpeg -hide_banner -f s16le -ar 16000 -ac 1 -i "$1" -af astats -f null - 2>&1 |
+		awk '/RMS level dB/ { v = $NF } END { if (v == "" || v == "-inf") v = -99; print v }'
+}
+
+listen() { # $1 = out.raw — blocks until one utterance is captured
+	local out="$1" speech=0 quiet=0 total=0 r
+	: >"$out"
+	log "🎤 ouvindo…"
+	while :; do
+		ffmpeg -hide_banner -loglevel error -f avfoundation -i ":$DEVICE" \
+			-t "$CHUNK_SECS" -f s16le -ar 16000 -ac 1 "$TMP/chunk.raw" 2>/dev/null ||
+			die "falha na captura do microfone (permita o acesso ao mic e confira UAII_LIVE_DEVICE=$DEVICE)"
+		cat "$TMP/chunk.raw" >>"$out"
+		total=$(awk -v a="$total" -v c="$CHUNK_SECS" 'BEGIN { printf "%.1f", a + c }')
+		r=$(rms_db "$TMP/chunk.raw")
+		if awk -v v="$r" -v t="$SILENCE_DB" 'BEGIN { exit !(v > t) }'; then
+			speech=1
+			quiet=0
+		elif [ "$speech" = 1 ]; then
+			quiet=$((quiet + 1))
+		fi
+		if [ "$speech" = 1 ] && [ "$quiet" -ge "$QUIET_CHUNKS" ]; then return 0; fi
+		if [ "$speech" = 1 ] &&
+			awk -v a="$total" -v b="$MAX_SECS" 'BEGIN { exit !(a >= b) }'; then
+			return 0
+		fi
+	done
+}
+
+stt() { # $1 = utt.raw → transcribed text (whisper via llama-swap)
+	local wav="${1}.wav"
+	ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 -i "$1" "$wav" || return 1
+	curl -s --max-time 60 "$BASE/audio/transcriptions" \
+		-F "file=@$wav" -F "model=$STT_MODEL" |
+		python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("text", "").strip())
+except Exception: print("")'
+}
+
+ask_pi() { # $1 = user text → final assistant text (pi headless, full tools)
+	pi --mode json $PI_ARGS -p "$1" 2>>"$TMP/pi.err" |
+		grep '"type":"message_end"' |
+		tail -1 |
+		node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=JSON.parse(s).message.content;console.log(c.filter(x=>x.type==="text").map(x=>x.text).join("\n").trim())}catch(e){console.log("")}})'
+}
+
+speak() { # $1 = text → pocket-tts via llama-swap → speakers
+	log "🔊 falando…"
+	curl -s --max-time 60 "$BASE/audio/speech" -H 'Content-Type: application/json' \
+		-d "$(node -e 'console.log(JSON.stringify({model:process.env.UAII_LIVE_TTS_MODEL,input:process.argv[1],voice:process.env.UAII_LIVE_TTS_VOICE,response_format:"wav"}))' "$1")" \
+		-o "$TMP/out.wav" || return 1
+	[ "$(wc -c <"$TMP/out.wav")" -gt 44 ] && afplay "$TMP/out.wav"
+}
+
+# ---------- main loop ----------
+
+log "UAII Live · STT $STT_MODEL · TTS $TTS_MODEL ($TTS_VOICE) · cérebro: pi completo $PI_ARGS"
+log "diga \"sair\" para encerrar · Ctrl+C sai"
+
+while :; do
+	U="$TMP/utt.raw"
+	listen "$U" || exit 1
+	[ "$(wc -c <"$U")" -lt 32000 ] && continue # <1s de áudio: ruído/toque acidental
+
+	TEXT=$(stt "$U") || die "whisper indisponível em $BASE"
+	[ -z "$TEXT" ] && {
+		log "(áudio ininteligível — repita)"
+		continue
+	}
+	log "Você: $TEXT"
+
+	low=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]')
+	case "$low" in
+	*sair* | *encerrar* | *"tchau"*)
+		speak "Até logo!"
+		exit 0
+		;;
+	esac
+
+	log "🧠 pi pensando…"
+	REPLY=$(ask_pi "$TEXT")
+	if [ -z "$REPLY" ]; then
+		log "⚠️  StructuredLoss: resposta vazia do pi (channel-off) — veja $TMP/pi.err"
+		REPLY="Não consegui responder."
+	fi
+
+	n=$(printf '%s' "$REPLY" | wc -c)
+	if [ "$n" -gt "$SPOKEN_MAX" ]; then
+		log "⚠️  StructuredLoss: $((n - SPOKEN_MAX)) caracteres não falados (bandwidth)"
+		REPLY=$(MAX=$SPOKEN_MAX node -e 'console.log(process.argv[1].slice(0,Number(process.env.MAX)))' "$REPLY")
+	fi
+	log "UAII: $REPLY"
+	speak "$REPLY" || log "⚠️  StructuredLoss: TTS indisponível em $BASE (channel-off)"
+done

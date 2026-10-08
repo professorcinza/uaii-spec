@@ -53,6 +53,22 @@ Degradation ladders (§5) — first available rung wins, every skipped rung is a
 
 Set `ttsModel` or `chatModel` to `""` to skip that rung. When llama-swap is down, the extension keeps working and records the loss — never a silent failure (R2).
 
+## UAII Live — hands-free voice (`bin/uaii-live`)
+
+A terminal voice loop: **mic → whisper → pi agent (full tools) → pocket-tts → speakers**, all through llama-swap. Half-duplex: the mic listens only while the agent is silent, so it never hears itself. Every failure speaks a declared loss (R2) and answers longer than 400 chars are truncated with a `StructuredLoss` on stderr (§5).
+
+```bash
+uaii-live              # in any project directory — pi runs there with full tools
+```
+
+Speak naturally; ~2.4s of silence ends your turn. Say **"sair"** (or tchau/encerrar) to exit; Ctrl+C always works.
+
+Requirements: `ffmpeg` (mic capture, avfoundation), `afplay`, `curl`, `node`, `pi`, and llama-swap serving `whisper-large-v3-turbo` + `pocket-tts-pt` (see the `inference` defaults above). On first run macOS asks for microphone permission — grant it to your terminal.
+
+Tuning (env): `UAII_LIVE_DEVICE` (mic index), `UAII_LIVE_SILENCE_DB` (speech threshold, default −40), `UAII_LIVE_QUIET_CHUNKS`, `UAII_LIVE_MAX_SECS`, `UAII_LIVE_STT_MODEL`, `UAII_LIVE_TTS_MODEL`, `UAII_LIVE_TTS_VOICE`, `UAII_LIVE_BASE_URL`, `UAII_LIVE_PI_ARGS` (default `--no-extensions` — the UAII pi extension would double-speak otherwise).
+
+This is a preview of the §7 input-fusion work: it is a client-side loop, not yet a UAII protocol mode. A true realtime (sub-second, barge-in) experience needs a speech-to-speech model; the ladder here is honest about that instead of pretending (R2).
+
 ## Contributing
 
 Co-design review with assistive-technology user communities is required before v0.1 freeze. Open issues against the §7 items — input fusion grammar, cross-channel state sync, latency budgets, BCI contract, localization.
