@@ -1,6 +1,6 @@
 {
   "name": "uaii-spec",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "UAII — Unified AI Accessibility Interface: public specification plus reference pi extension implementing Intent Objects, channel renderers, User Profile, capability negotiation, and declared (never silent) loss.",
   "keywords": [
     "pi-package",

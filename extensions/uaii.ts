@@ -15,7 +15,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // ---------- §3.3 User Profile ----------
@@ -23,9 +23,12 @@ import { join } from "node:path";
 type Channel = "text" | "audio" | "plain-language";
 type Urgency = "background" | "normal" | "alert" | "critical";
 
+type Inference = { baseUrl: string; chatModel: string; ttsModel: string; ttsVoice: string };
+
 type Profile = {
 	channels: { channel: Channel; enabled: boolean }[];
 	urgencyThreshold: Urgency;
+	inference: Inference; // llama-swap (or any OpenAI-compatible) local binding
 	constraints: { ttsMaxChars: number; plainMaxChars: number; plainMinChars: number };
 };
 
@@ -38,13 +41,19 @@ const DEFAULT_PROFILE: Profile = {
 		{ channel: "plain-language", enabled: false },
 	],
 	urgencyThreshold: "normal",
+	inference: { baseUrl: "http://localhost:9292/v1", chatModel: "zai/glm-5.3-flash", ttsModel: "pocket-tts-pt", ttsVoice: "alba" },
 	constraints: { ttsMaxChars: 400, plainMaxChars: 4000, plainMinChars: 120 },
 };
 
 function loadProfile(): Profile {
 	try {
 		const raw = JSON.parse(readFileSync(PROFILE_PATH, "utf8")) as Partial<Profile>;
-		return { ...DEFAULT_PROFILE, ...raw, constraints: { ...DEFAULT_PROFILE.constraints, ...raw.constraints } };
+		return {
+			...DEFAULT_PROFILE,
+			...raw,
+			inference: { ...DEFAULT_PROFILE.inference, ...raw.inference },
+			constraints: { ...DEFAULT_PROFILE.constraints, ...raw.constraints },
+		};
 	} catch {
 		return structuredClone(DEFAULT_PROFILE);
 	}
@@ -112,6 +121,38 @@ function speakable(intent: Intent, maxChars: number, losses: StructuredLoss[]): 
 	return out;
 }
 
+// ---------- llama-swap (OpenAI-compatible local inference) ----------
+
+const usableInference = (profile: Profile) =>
+	/^https?:\/\//.test(profile.inference.baseUrl) ? profile.inference : undefined;
+
+async function llamaChat(baseUrl: string, model: string, prompt: string): Promise<string> {
+	const res = await fetch(`${baseUrl}/chat/completions`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 1024 }),
+	});
+	if (!res.ok) throw new Error(`llama-swap chat ${res.status}`);
+	const data = (await res.json()) as { choices?: { message?: { content?: unknown } }[] };
+	const text = data.choices?.[0]?.message?.content;
+	if (typeof text !== "string" || !text.trim()) throw new Error("llama-swap chat: empty content");
+	return text.trim();
+}
+
+async function llamaTts(baseUrl: string, inference: Inference, text: string): Promise<string> {
+	const res = await fetch(`${baseUrl}/audio/speech`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ model: inference.ttsModel, input: text, voice: inference.ttsVoice || "alba", response_format: "wav" }),
+	});
+	if (!res.ok) throw new Error(`llama-swap tts ${res.status}`);
+	const buf = Buffer.from(await res.arrayBuffer());
+	if (buf.length < 44) throw new Error("llama-swap tts: empty audio");
+	const file = join(tmpdir(), `uaii-tts-${Date.now()}.wav`);
+	writeFileSync(file, buf);
+	return file;
+}
+
 // ---------- Extension ----------
 
 export default function uaiiExtension(pi: ExtensionAPI) {
@@ -154,8 +195,23 @@ export default function uaiiExtension(pi: ExtensionAPI) {
 		const speech = speakable(intent, profile.constraints.ttsMaxChars, losses);
 		recordLosses(losses);
 		if (!speech.trim()) return;
+		// §5 ladder: llama-swap TTS (local PT voice) → macOS `say` → StructuredLoss
+		const inference = usableInference(profile);
+		if (inference?.ttsModel) {
+			try {
+				const file = await llamaTts(inference.baseUrl, inference, speech);
+				try {
+					await pi.exec("afplay", [file]);
+					return;
+				} catch {
+					// playback failed → declared loss, fall through to `say`
+				}
+			} catch {
+				recordLosses([{ intentKind: intent.kind, channel: "audio", lost: "llama-swap TTS attempt", reason: "channel-off" }]);
+			}
+		}
 		try {
-			await pi.exec("say", [speech]); // fire-and-forget guarded by try; failure → declared loss
+			await pi.exec("say", [speech]);
 		} catch {
 			platformAudioOK = false;
 			recordLosses([{ intentKind: intent.kind, channel: "audio", lost: "entire utterance", reason: "channel-off" }]);
@@ -164,24 +220,40 @@ export default function uaiiExtension(pi: ExtensionAPI) {
 
 	const renderPlain = async (intent: Intent, ctx: ExtensionContext) => {
 		if (intent.text.length < profile.constraints.plainMinChars) return;
-		const model = ctx.model;
 		const losses: StructuredLoss[] = [];
-		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
-			recordLosses([{ intentKind: intent.kind, channel: "plain-language", lost: "entire rewrite", reason: "channel-off" }]);
-			return;
-		}
 		const source =
 			intent.text.length > profile.constraints.plainMaxChars
-				? (recordLosses([
-						{
-							intentKind: intent.kind,
-							channel: "plain-language",
-							lost: `${intent.text.length - profile.constraints.plainMaxChars} characters`,
-							reason: "bandwidth",
-						},
-					]),
+				? (losses.push({
+						intentKind: intent.kind,
+						channel: "plain-language",
+						lost: `${intent.text.length - profile.constraints.plainMaxChars} characters`,
+						reason: "bandwidth",
+					}),
 					intent.text.slice(0, profile.constraints.plainMaxChars))
 				: intent.text;
+		// §5 ladder: llama-swap chat model → session model → StructuredLoss
+		const inference = usableInference(profile);
+		if (inference?.chatModel) {
+			try {
+				const rewrite = await llamaChat(
+					inference.baseUrl,
+					inference.chatModel,
+					`Rewrite this assistant reply in plain language: short sentences, no jargon, keep every fact. Output only the rewrite.\n\n${source}`,
+				);
+				recordLosses(losses);
+				if (ctx.hasUI) ctx.ui.notify(`UAII plain: ${rewrite}`, "info"); // R7
+				return;
+			} catch {
+				losses.push({ intentKind: intent.kind, channel: "plain-language", lost: "llama-swap rewrite", reason: "channel-off" });
+			}
+		}
+		const model = ctx.model;
+		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+			losses.push({ intentKind: intent.kind, channel: "plain-language", lost: "entire rewrite", reason: "channel-off" });
+			recordLosses(losses);
+			return;
+		}
+		recordLosses(losses);
 		try {
 			const response = await ctx.modelRegistry.complete(
 				model,
@@ -251,7 +323,10 @@ export default function uaiiExtension(pi: ExtensionAPI) {
 			};
 
 			if (!sub || sub === "status") {
-				respond(`UAII negotiation (§3.4)\n${coverageMap()}\nUrgency threshold: ${profile.urgencyThreshold}\nProfile: ${PROFILE_PATH}`);
+				const inf = profile.inference;
+				respond(
+					`UAII negotiation (§3.4)\n${coverageMap()}\nUrgency threshold: ${profile.urgencyThreshold}\nInference: ${inf.baseUrl || "none"} · chat ${inf.chatModel || "session model"} · tts ${inf.ttsModel || "say"} (${inf.ttsVoice})\nProfile: ${PROFILE_PATH}`,
+				);
 				return;
 			}
 			if (sub === "loss") {
