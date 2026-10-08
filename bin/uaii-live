@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # UAII Live — hands-free voice loop for the pi agent (SPEC §7 "input fusion" preview).
 #
-#   mic (ffmpeg VAD) → parakeet/whisper STT (llama-swap, §5 ladder) → pi agent (full tools) → pocket-tts (llama-swap) → afplay
+#   mic (ffmpeg VAD) → parakeet STT (llama-swap) → pi agent (full tools) → pocket-tts (llama-swap) → afplay
 #
 # Half-duplex by design: the microphone listens only while the agent is silent,
 # so the agent never hears itself (SPEC §5 ladder, R2 declared losses).
@@ -10,8 +10,7 @@
 #   say "sair" (or tchau / encerrar) to exit · Ctrl+C always works
 #
 # Config (env): UAII_LIVE_BASE_URL   default http://localhost:9292/v1 (any OpenAI-compatible)
-#               UAII_LIVE_STT_MODEL  default "parakeet whisper-large-v3-turbo"
-#                                    (space-separated ladder: tried in order, §5)
+#               UAII_LIVE_STT_MODEL  default "parakeet" (space-separated ladder, §5)
 #               UAII_LIVE_TTS_MODEL  default pocket-tts-pt
 #               UAII_LIVE_TTS_VOICE  default alba
 #               UAII_LIVE_DEVICE     ffmpeg avfoundation audio index, default 0
@@ -22,7 +21,7 @@
 set -u
 
 BASE="${UAII_LIVE_BASE_URL:-http://localhost:9292/v1}"
-STT_MODELS="${UAII_LIVE_STT_MODEL:-parakeet whisper-large-v3-turbo}" # §5 ladder
+STT_MODELS="${UAII_LIVE_STT_MODEL:-parakeet}" # §5 ladder; last rung failing = declared loss
 TTS_MODEL="${UAII_LIVE_TTS_MODEL:-pocket-tts-pt}"
 TTS_VOICE="${UAII_LIVE_TTS_VOICE:-alba}"
 DEVICE="${UAII_LIVE_DEVICE:-0}"

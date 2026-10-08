@@ -55,9 +55,9 @@ Set `ttsModel` or `chatModel` to `""` to skip that rung. When llama-swap is down
 
 ## UAII Live — hands-free voice (`bin/uaii-live`)
 
-A terminal voice loop: **mic → parakeet → whisper (STT ladder) → pi agent (full tools) → pocket-tts → speakers**, all through llama-swap. Half-duplex: the mic listens only while the agent is silent, so it never hears itself. Every failure speaks a declared loss (R2) and answers longer than 400 chars are truncated with a `StructuredLoss` on stderr (§5).
+A terminal voice loop: **mic → parakeet STT → pi agent (full tools) → pocket-tts → speakers**, all through llama-swap. Half-duplex: the mic listens only while the agent is silent, so it never hears itself. Every failure speaks a declared loss (R2) and answers longer than 400 chars are truncated with a `StructuredLoss` on stderr (§5).
 
-Default STT ladder (§5): **parakeet-pt** (NVIDIA Parakeet TDT 0.6b v3, multilingual incl. pt-BR, MLX) → `whisper-large-v3-turbo` → declared loss. Benchmark on a 2.2 s pt-BR clip (M1 8 GB, warm): parakeet ≈ 0.5 s vs whisper ≈ 5 s. Parakeet is served by [paratran](https://pypi.org/project/paratran/) through `bin/paratran-serve.py`, a launcher that pins all MLX work to one worker thread (MLX binds arrays to the loading thread's stream — cross-thread inference fails with `There is no Stream(cpu, 1) in current thread`). llama-swap runs it as the `parakeet-pt` model (`aliases: [parakeet]`) alongside whisper in the `voice` group.
+STT is **parakeet-pt** (NVIDIA Parakeet TDT 0.6b v3, multilingual incl. pt-BR, MLX). Benchmark against the previous whisper-large-v3-turbo rung on a 2.2 s pt-BR clip (M1 8 GB, warm): parakeet ≈ 0.5 s vs whisper ≈ 5 s — about 10× faster, which is why it is now the only STT rung. Parakeet is served by [paratran](https://pypi.org/project/paratran/) through `bin/paratran-serve.py`, a launcher that pins all MLX work to one worker thread (MLX binds arrays to the loading thread's stream — cross-thread inference fails with `There is no Stream(cpu, 1) in current thread`). llama-swap runs it as the `parakeet-pt` model (`aliases: [parakeet]`) in the `voice` group.
 
 ```bash
 uaii-live              # in any project directory — pi runs there with full tools
@@ -65,9 +65,9 @@ uaii-live              # in any project directory — pi runs there with full to
 
 Speak naturally; ~2.4s of silence ends your turn. Say **"sair"** (or tchau/encerrar) to exit; Ctrl+C always works.
 
-Requirements: `ffmpeg` (mic capture, avfoundation), `afplay`, `curl`, `node`, `pi`, and llama-swap serving `parakeet-pt` + `whisper-large-v3-turbo` + `pocket-tts-pt` (see the `inference` defaults above). On first run macOS asks for microphone permission — grant it to your terminal.
+Requirements: `ffmpeg` (mic capture, avfoundation), `afplay`, `curl`, `node`, `pi`, and llama-swap serving `parakeet-pt` + `pocket-tts-pt` (see the `inference` defaults above). On first run macOS asks for microphone permission — grant it to your terminal.
 
-Tuning (env): `UAII_LIVE_DEVICE` (mic index), `UAII_LIVE_SILENCE_DB` (speech threshold, default −40), `UAII_LIVE_QUIET_CHUNKS`, `UAII_LIVE_MAX_SECS`, `UAII_LIVE_STT_MODEL` (space-separated ladder, default `"parakeet whisper-large-v3-turbo"`), `UAII_LIVE_TTS_MODEL`, `UAII_LIVE_TTS_VOICE`, `UAII_LIVE_BASE_URL`, `UAII_LIVE_PI_ARGS` (default `--no-extensions` — the UAII pi extension would double-speak otherwise).
+Tuning (env): `UAII_LIVE_DEVICE` (mic index), `UAII_LIVE_SILENCE_DB` (speech threshold, default −40), `UAII_LIVE_QUIET_CHUNKS`, `UAII_LIVE_MAX_SECS`, `UAII_LIVE_STT_MODEL` (space-separated ladder, default `"parakeet"`), `UAII_LIVE_TTS_MODEL`, `UAII_LIVE_TTS_VOICE`, `UAII_LIVE_BASE_URL`, `UAII_LIVE_PI_ARGS` (default `--no-extensions` — the UAII pi extension would double-speak otherwise).
 
 This is a preview of the §7 input-fusion work: it is a client-side loop, not yet a UAII protocol mode. A true realtime (sub-second, barge-in) experience needs a speech-to-speech model; the ladder here is honest about that instead of pretending (R2).
 
